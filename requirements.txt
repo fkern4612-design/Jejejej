@@ -1,0 +1,10 @@
+flask
+selenium
+webdriver-manager
+rich
+flask
+rich
+selenium
+webdriver-manager
+gunicorn
+pillow
