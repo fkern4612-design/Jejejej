@@ -1,860 +1,1507 @@
-from flask import Flask, render_template, request, jsonify
-import random
-import string
-import threading
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-import time
-from queue import Queue
-import uuid
-from threading import Semaphore
+from flask import Flask, render_template, request, jsonify, session
+from datetime import datetime, date, timedelta
+from pathlib import Path
 import json
-import os
-from datetime import datetime
-
-from spotify_aio import spotify_bp
 
 app = Flask(__name__)
-app.register_blueprint(spotify_bp)
-browser_semaphore = Semaphore(5)  # Limit to 5 concurrent browsers
+app.secret_key = 'daily_routine_secret_key_2025'
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
-# Main routes
+USERS = {
+    'Husband': 'DailyRoutine',
+    'Wife': 'DailyRoutine',
+    'Admin': 'AdminMaster2025'
+}
+
+ADMIN_USERS = ['Admin']
+
+PARTNER = {
+    'Husband': 'Wife',
+    'Wife': 'Husband'
+}
+
+def get_feelings_file(username):
+    return DATA_DIR / f'{username}_feelings.json'
+
+def load_feelings_history(username):
+    feelings_file = get_feelings_file(username)
+    if feelings_file.exists():
+        with open(feelings_file, 'r') as f:
+            return json.load(f)
+    return []
+
+def save_feeling(username, feeling, notes=''):
+    history = load_feelings_history(username)
+    history.append({
+        'emoji': feeling,
+        'notes': notes,
+        'timestamp': datetime.now().isoformat(),
+        'date': date.today().isoformat()
+    })
+    with open(get_feelings_file(username), 'w') as f:
+        json.dump(history, f, indent=2)
+    return history
+
+def get_today_feelings(username):
+    history = load_feelings_history(username)
+    today = date.today().isoformat()
+    return [f for f in history if f.get('date') == today]
+
+ROUTINE_FILE = Path.home() / '.daily_routine' / 'default_routine.json'
+
+def get_default_routine():
+    if ROUTINE_FILE.exists():
+        with open(ROUTINE_FILE, 'r') as f:
+            return json.load(f)
+    return DEFAULT_ROUTINE
+
+def save_default_routine(routine):
+    with open(ROUTINE_FILE, 'w') as f:
+        json.dump(routine, f, indent=2)
+
+DATA_DIR = Path.home() / '.daily_routine'
+DATA_DIR.mkdir(exist_ok=True)
+
+# Partnership data file
+PARTNERSHIP_FILE = DATA_DIR / 'partnership.json'
+DEFAULT_PARTNERSHIP = {
+    'together_since': '2020-01-15',
+    'location': 'Berlin, Germany',
+    'couple_name': 'Us',
+    'goals': [
+        'Build a stronger relationship',
+        'Maintain healthy routines',
+        'Support each other emotionally',
+        'Create beautiful memories together'
+    ],
+    'notes': 'Welcome to your couple routine tracker! Track activities together and strengthen your bond.',
+    'anniversaries': [
+        {'date': '2020-01-15', 'name': 'Together Anniversary'},
+        {'date': '2024-06-15', 'name': 'Last Special Date'}
+    ]
+}
+
+DEFAULT_ROUTINE = {
+    'Morning': [
+        {'name': 'Alarm at 9 AM', 'emoji': '⏰', 'time': '09:00', 'completed': False},
+        {'name': 'Get up immediately (no snooze)', 'emoji': '🛏️', 'time': '09:05', 'completed': False},
+        {'name': 'Brush teeth', 'emoji': '🪥', 'time': '09:10', 'completed': False},
+        {'name': 'Wash face', 'emoji': '🧼', 'time': '09:15', 'completed': False},
+        {'name': 'Drink water', 'emoji': '💧', 'time': '09:20', 'completed': False},
+        {'name': 'Breakfast together', 'emoji': '🍽️', 'time': '09:30', 'completed': False},
+        {'name': 'Discuss daily goals', 'emoji': '💬', 'time': '10:00', 'completed': False},
+    ],
+    'Daily': [
+        {'name': 'Breakfast', 'emoji': '🥞', 'time': '09:30', 'completed': False},
+        {'name': 'Drink plenty of water', 'emoji': '💧', 'time': '12:00', 'completed': False},
+        {'name': 'Lunch', 'emoji': '🥗', 'time': '12:30', 'completed': False},
+        {'name': 'At least one walk per day', 'emoji': '🚶', 'time': '15:00', 'completed': False},
+        {'name': 'Get daylight (good for mental health)', 'emoji': '☀️', 'time': '15:30', 'completed': False},
+        {'name': 'Plan 1 activity per day', 'emoji': '📋', 'time': '14:00', 'completed': False},
+        {'name': 'Don\'t delay household tasks', 'emoji': '🏠', 'time': '16:00', 'completed': False},
+        {'name': 'Tidy up 15-20 minutes', 'emoji': '🧹', 'time': '17:00', 'completed': False},
+        {'name': 'Make time for us', 'emoji': '💑', 'time': '18:00', 'completed': False},
+        {'name': 'Observe and name triggers', 'emoji': '🎯', 'time': '19:00', 'completed': False},
+        {'name': 'Dinner', 'emoji': '🍴', 'time': '19:30', 'completed': False},
+    ],
+    'Relationship': [
+        {'name': 'At least 1 good conversation daily', 'emoji': '💬', 'time': '20:00', 'completed': False},
+        {'name': 'Small daily gesture (text, call, hug)', 'emoji': '💌', 'time': '10:00', 'completed': False},
+        {'name': '2-3 joint activities per week', 'emoji': '🎭', 'time': '18:00', 'completed': False},
+        {'name': 'Fixed date night weekly', 'emoji': '💕', 'time': '19:00', 'completed': False},
+        {'name': 'One important thing per week', 'emoji': '⭐', 'time': '20:00', 'completed': False},
+        {'name': 'Plan together (meals, activities, chores)', 'emoji': '📅', 'time': '09:00', 'completed': False},
+        {'name': 'Transparent communication about mood', 'emoji': '🤝', 'time': '20:30', 'completed': False},
+        {'name': 'No unresolved conflicts before bed', 'emoji': '🕊️', 'time': '22:30', 'completed': False},
+    ],
+    'Evening': [
+        {'name': 'Dinner at regular time', 'emoji': '🍽️', 'time': '19:30', 'completed': False},
+        {'name': 'Wind down together', 'emoji': '🧘', 'time': '21:00', 'completed': False},
+        {'name': 'Put phone away (by 23:00)', 'emoji': '📵', 'time': '22:30', 'completed': False},
+        {'name': 'Daily reflection (1-2 min)', 'emoji': '🧠', 'time': '22:45', 'completed': False},
+        {'name': 'Name your feelings', 'emoji': '❤️', 'time': '22:50', 'completed': False},
+        {'name': 'Calm your body', 'emoji': '😴', 'time': '23:00', 'completed': False},
+        {'name': 'Sleep before 23:00 (weekdays)', 'emoji': '🛌', 'time': '23:00', 'completed': False},
+        {'name': 'Sleep before 01:00 (weekends)', 'emoji': '🌙', 'time': '00:30', 'completed': False},
+    ]
+}
+
+def get_partnership_data():
+    if PARTNERSHIP_FILE.exists():
+        with open(PARTNERSHIP_FILE, 'r') as f:
+            return json.load(f)
+    return DEFAULT_PARTNERSHIP
+
+def save_partnership_data(data):
+    with open(PARTNERSHIP_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+def get_routine_file(username):
+    return DATA_DIR / f'{username}_routine.json'
+
+def load_routine(username):
+    routine_file = get_routine_file(username)
+    if routine_file.exists():
+        with open(routine_file, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_routine(username, routine):
+    routine_file = get_routine_file(username)
+    with open(routine_file, 'w') as f:
+        json.dump(routine, f, indent=2)
+
+def get_today_key():
+    return datetime.now().strftime('%Y-%m-%d')
+
+def initialize_today(routine):
+    today = get_today_key()
+    if today not in routine:
+        routine[today] = {}
+        for category, activities in DEFAULT_ROUTINE.items():
+            routine[today][category] = [dict(a) for a in activities]
+    return routine
+
+def calculate_days_together():
+    partnership = get_partnership_data()
+    start_date = datetime.strptime(partnership['together_since'], '%Y-%m-%d').date()
+    days = (date.today() - start_date).days
+    years = days // 365
+    months = (days % 365) // 30
+    return {'days': days, 'years': years, 'months': months}
+
 @app.route('/')
-def home():
-    return render_template('launcher.html')
-
-@app.route('/launcher')
-def launcher():
-    return render_template('launcher.html')
-
-@app.route('/spotify-viewer')
-def spotify_viewer():
-    """Spotify Live Screen Viewer"""
-    return render_template('spotify_viewer.html')
-
-bot_status = {}
-drivers = []
-check_jobs = {}
-job_lock = threading.Lock()
-bot_names = {}
-leaderboard = {}
-tiktok_jobs = {}
-bot_drivers = {}  # Store driver refs for video capture
-flooder_active = False
-flooder_games = {}  # {game_pin: {code, bot_count, driver, bot_drivers}}
-flooder_thread = None
-flooder_bot_drivers = {}  # Keep flooder bots alive
-flooder_status = {"status": "Idle", "games_created": 0, "bots_joined": 0, "current_game": None}
-successful_bots = 0  # Track successful joins
-target_bots = 0  # Target number of successful bots
-bot_buffer_lock = threading.Lock()  # Lock for tracking successful joins
-
-def generate_random_username(length=8, custom_prefix=""):
-    if custom_prefix:
-        chars = string.ascii_letters + string.digits
-        return custom_prefix + ''.join(random.choice(chars) for _ in range(length))
-    chars = string.ascii_letters + string.digits
-    return 'Sex' + ''.join(random.choice(chars) for _ in range(length))
-
-def launch_browser():
-    """Launch browser with semaphore to prevent resource exhaustion"""
-    browser_semaphore.acquire()  # Wait if too many browsers already running
-    try:
-        options = webdriver.ChromeOptions()
-        options.add_argument("--headless=new")
-        options.add_argument("--disable-extensions")
-        options.add_argument("--disable-infobars")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--log-level=3")
-        options.add_experimental_option("excludeSwitches", ["enable-logging"])
-        
-        driver = webdriver.Chrome(options=options)
-        drivers.append(driver)
-        return driver
-    except Exception as e:
-        browser_semaphore.release()
-        raise e
-
-def wait_for_clickable(driver, by, locator, timeout=8, retries=3):
-    for attempt in range(retries):
-        try:
-            wait = WebDriverWait(driver, timeout, poll_frequency=0.1)
-            element = wait.until(EC.element_to_be_clickable((by, locator)))
-            return element
-        except:
-            time.sleep(0.3)
-    raise Exception(f"Element {locator} not clickable after {retries} retries")
-
-def join_bot_with_buffer(game_pin: str, bot_number: int, custom_prefix: str = "", target: int = 10):
-    """Join bot with buffer - stop trying if we've reached target"""
-    global bot_status, bot_names, bot_drivers, successful_bots, target_bots, bot_buffer_lock, browser_semaphore
-    
-    # Check if we've already reached target
-    with bot_buffer_lock:
-        if successful_bots >= target:
-            bot_status[bot_number] = "Skipped (target reached)"
-            return
-    
-    driver = None
-    try:
-        bot_status[bot_number] = "Launching browser..."
-        driver = launch_browser()
-        bot_drivers[bot_number] = driver
-        
-        driver.get("https://www.kahoot.it")
-
-        # Enter Game PIN
-        bot_status[bot_number] = "Entering Game PIN..."
-        game_input = wait_for_clickable(driver, By.ID, "game-input")
-        game_input.clear()
-        game_input.send_keys(game_pin)
-        game_input.send_keys(Keys.ENTER)
-
-        # Click Join
-        bot_status[bot_number] = "Clicking Join button..."
-        join_button = wait_for_clickable(driver, By.CSS_SELECTOR, "main div form button")
-        driver.execute_script("arguments[0].click();", join_button)
-
-        # Enter nickname
-        bot_status[bot_number] = "Entering nickname..."
-        nickname_input = wait_for_clickable(driver, By.CSS_SELECTOR, "#nickname")
-        nickname = generate_random_username(custom_prefix=custom_prefix)
-        nickname_input.clear()
-        nickname_input.send_keys(nickname)
-        nickname_input.send_keys(Keys.ENTER)
-        
-        bot_names[bot_number] = nickname
-        bot_status[bot_number] = f"✓ Joined as {nickname}"
-        
-        # Increment successful count
-        with bot_buffer_lock:
-            successful_bots += 1
-
-        # Keep running
-        while True:
-            time.sleep(10)
-
-    except Exception as e:
-        bot_status[bot_number] = f"✗ Error: {str(e)}"
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
-        browser_semaphore.release()
-    finally:
-        # Try to keep the loop going
-        if bot_status.get(bot_number, "").startswith("✗"):
-            while True:
-                time.sleep(10)
-
-def join_bot(game_pin: str, bot_number: int, custom_prefix: str = ""):
-    """Legacy join_bot for compatibility"""
-    join_bot_with_buffer(game_pin, bot_number, custom_prefix, 1)
-
-@app.route('/')
-def launcher_home():
-    return render_template('launcher.html')
-
-@app.route('/kahoot')
 def index():
-    return render_template('index.html')
+    if 'username' in session:
+        return render_template('index.html', username=session['username'])
+    return render_template('login.html')
 
-@app.route('/status')
-def status():
-    return render_template('status.html')
+# Device info storage
+DEVICE_INFO_FILE = DATA_DIR / 'device_info.json'
 
-@app.route('/game-generator')
-def game_generator():
-    return render_template('game_generator.html')
+def get_all_device_info():
+    if DEVICE_INFO_FILE.exists():
+        with open(DEVICE_INFO_FILE, 'r') as f:
+            return json.load(f)
+    return {}
 
-def create_and_extract_game_pin():
-    """GitHub exact implementation - creates game and extracts PIN"""
-    driver = None
-    try:
-        options = webdriver.ChromeOptions()
-        options.add_argument("--headless=new")
-        options.add_argument("--disable-extensions")
-        options.add_argument("--disable-infobars")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--log-level=3")
-        options.add_experimental_option("excludeSwitches", ["enable-logging"])
-        
-        driver = webdriver.Chrome(options=options)
-        driver.set_page_load_timeout(20)
-        
-        # Open the Kahoot game page
-        driver.get("https://play.kahoot.it/v2/?quizId=a13d166b-c332-4085-a8c5-9e15321b7024")
-        
-        wait = WebDriverWait(driver, 20)
-        
-        # CLICK COOKIE BUTTON
-        try:
-            cookie_button = wait.until(
-                EC.element_to_be_clickable((By.ID, "onetrust-accept-btn-handler"))
-            )
-            cookie_button.click()
-        except:
-            pass
-        
-        # CLICK FIRST BUTTON
-        try:
-            first_btn = wait.until(
-                EC.element_to_be_clickable(
-                    (By.CSS_SELECTOR, ".button__Button-sc-c6mvr2-0.iVnhsJ")
-                )
-            )
-            first_btn.click()
-        except:
-            pass
-        
-        # CLICK START BUTTON
-        try:
-            start_btn = wait.until(
-                EC.element_to_be_clickable(
-                    (By.CSS_SELECTOR, ".fluid-button__Button-sc-1jrnqsz-2.ejFPvE.start-button__Button-sc-7wankj-12.hfmKJH")
-                )
-            )
-            start_btn.click()
-        except:
-            pass
-        
-        # READ THE GAME PIN
-        try:
-            pin_parts = wait.until(
-                EC.presence_of_all_elements_located(
-                    (By.CSS_SELECTOR, "button[data-functional-selector='game-pin'] span")
-                )
-            )
-            game_pin = "".join([part.text for part in pin_parts])
-            
-            if game_pin:
-                return game_pin, driver
-        except:
-            pass
-        
-        driver.quit()
-        return None, None
-            
-    except Exception as e:
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
-        return None, None
+def save_device_info(device_data):
+    info = get_all_device_info()
+    info.update(device_data)
+    with open(DEVICE_INFO_FILE, 'w') as f:
+        json.dump(info, f, indent=2)
 
-@app.route('/api/generate-game', methods=['POST'])
-def generate_game():
-    try:
-        game_pin, driver = create_and_extract_game_pin()
-        
-        if game_pin and driver:
-            driver.quit()
-            return jsonify({
-                "success": True,
-                "pin": game_pin,
-                "message": f"Game PIN: {game_pin}"
-            })
-        
-        # If no PIN found, return error
-        return jsonify({
-            "success": False,
-            "error": "Could not extract game PIN"
-        }), 400
-            
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 400
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    username = data.get('username', '').strip()
+    password = data.get('password', '').strip()
+    
+    if username in USERS and USERS[username] == password:
+        session.permanent = True
+        session['username'] = username
+        return jsonify({'success': True, 'username': username})
+    return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
 
-def flooder_worker():
-    """Flooder - creates 30s games and fills with 10 bots via dashboard joiner"""
-    global flooder_active, flooder_games, flooder_bot_drivers, flooder_status
+@app.route('/api/save-device-info', methods=['POST'])
+def save_device_info_endpoint():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
     
-    game_count = 0
-    bot_count = 0
+    data = request.get_json()
+    username = session['username']
     
-    while flooder_active:
-        try:
-            flooder_status["status"] = f"🎮 Creating game #{game_count + 1}..."
-            flooder_status["games_created"] = game_count
-            flooder_status["bots_joined"] = bot_count
-            
-            # Create game using exact working code
-            game_pin, game_driver = create_and_extract_game_pin()
-            
-            if game_pin and game_driver:
-                game_count += 1
-                flooder_games[game_pin] = {
-                    "code": game_pin,
-                    "bot_count": 0,
-                    "driver": game_driver,
-                    "bot_drivers": []
-                }
-                flooder_status["current_game"] = game_pin
-                flooder_status["status"] = f"✅ Created game: {game_pin} - Starting 10 bots..."
-                
-                try:
-                    # Use dashboard joiner to add 10 bots via API
-                    import requests
-                    response = requests.post('http://localhost:5000/api/start', json={
-                        'game_pin': game_pin,
-                        'num_bots': 10,
-                        'custom_prefix': 'FlooperBot'
-                    }, timeout=5)
-                    
-                    if response.status_code == 200:
-                        flooder_status["status"] = f"👥 Joining 10 bots to {game_pin}..."
-                        bot_count += 10
-                        flooder_games[game_pin]["bot_count"] = 10
-                        flooder_status["bots_joined"] = bot_count
-                except:
-                    # Fallback: try to join manually if API fails
-                    flooder_status["status"] = f"⚠️ API method failed, trying manual join..."
-                    pass
-                
-                # Game runs for 30 seconds
-                flooder_status["status"] = f"🎮 Game {game_pin} running (30s)..."
-                time.sleep(30)
-                
-                # Clean up after 30s
-                flooder_status["status"] = f"✅ Game {game_pin} complete - Next game..."
-                if game_pin in flooder_games:
-                    try:
-                        game_driver.quit()
-                    except:
-                        pass
-                    flooder_games.pop(game_pin, None)
-                time.sleep(2)
-            else:
-                flooder_status["status"] = "⚠️ Failed to create game"
-                time.sleep(2)
-        
-        except Exception as e:
-            flooder_status["status"] = f"❌ Error: {str(e)}"
-            time.sleep(2)
+    device_data = {
+        username: {
+            'client_ip': data.get('client_ip'),
+            'user_agent': data.get('user_agent'),
+            'screen_size': data.get('screen_size'),
+            'timezone': data.get('timezone'),
+            'timestamp': datetime.now().isoformat()
+        }
+    }
+    
+    save_device_info(device_data)
+    return jsonify({'success': True})
 
-@app.route('/api/start-flooder', methods=['POST'])
-def start_flooder():
-    global flooder_active, flooder_thread, flooder_status
-    
-    if flooder_active:
-        return jsonify({"success": False, "message": "Flooder already running"}), 400
-    
-    flooder_active = True
-    flooder_status = {"status": "Starting...", "games_created": 0, "bots_joined": 0, "current_game": None}
-    
-    # Start single worker thread - sequential, no parallel workers
-    flooder_thread = threading.Thread(target=flooder_worker, daemon=True)
-    flooder_thread.start()
-    
-    return jsonify({"success": True, "message": "Flooder started - creating games sequentially"})
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    session.pop('username', None)
+    return jsonify({'success': True})
 
-@app.route('/api/stop-flooder', methods=['POST'])
-def stop_flooder():
-    global flooder_active, flooder_games, flooder_status
-    
-    flooder_active = False
-    
-    # Clean up all games
-    for pin, game_info in list(flooder_games.items()):
-        try:
-            game_info["driver"].quit()
-        except:
-            pass
-    
-    flooder_games.clear()
-    flooder_status = {"status": "Stopped", "games_created": 0, "bots_joined": 0, "current_game": None}
-    
-    return jsonify({"success": True, "message": "Flooder stopped"})
+@app.route('/api/partnership', methods=['GET'])
+def get_partnership():
+    partnership = get_partnership_data()
+    days = calculate_days_together()
+    return jsonify({**partnership, **days})
 
-@app.route('/api/get-flooder-status', methods=['GET'])
-def get_flooder_status():
-    global flooder_active, flooder_games, flooder_status
+@app.route('/api/partnership/update', methods=['POST'])
+def update_partnership():
+    data = request.get_json()
+    partnership = get_partnership_data()
     
-    games_list = []
-    for pin, info in flooder_games.items():
-        games_list.append({
-            "code": info["code"],
-            "bots": info["bot_count"]
-        })
+    if 'location' in data:
+        partnership['location'] = data['location']
+    if 'notes' in data:
+        partnership['notes'] = data['notes']
+    if 'goals' in data:
+        partnership['goals'] = data['goals']
     
+    save_partnership_data(partnership)
+    return jsonify({'success': True})
+
+@app.route('/api/routine', methods=['GET'])
+def get_routine():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    username = session['username']
+    
+    # For Admin, show Husband's routine
+    if is_admin():
+        username = 'Husband'
+    
+    routine = load_routine(username)
+    routine = initialize_today(routine)
+    save_routine(username, routine)
+    
+    today = get_today_key()
     return jsonify({
-        "active": flooder_active,
-        "status": flooder_status.get("status", "Idle"),
-        "games_created": flooder_status.get("games_created", 0),
-        "bots_joined": flooder_status.get("bots_joined", 0),
-        "current_game": flooder_status.get("current_game", None),
-        "games": games_list,
-        "total_games": len(games_list),
-        "total_bots": sum(g["bots"] for g in games_list)
+        'today': today,
+        'routine': routine[today],
+        'username': username
     })
 
-@app.route('/viewer')
-def viewer():
-    return render_template('viewer.html')
-
-@app.route('/checker')
-def checker():
-    return render_template('checker.html')
-
-def validate_code_worker(job_id, start_num, end_num, length):
-    import requests
-    session = requests.Session()
-    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+@app.route('/api/partner-routine', methods=['GET'])
+def get_partner_routine():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
     
-    for i in range(start_num, end_num):
-        if job_id not in check_jobs:
-            break
-        
-        code = str(i).zfill(length)
-        is_valid = False
-        
-        try:
-            response = session.get(f"https://kahoot.it/rest/gameBlock?code={code}", timeout=2)
-            is_valid = response.status_code == 200 and 'game' in response.text.lower()
-            
-            with job_lock:
-                if job_id in check_jobs:
-                    check_jobs[job_id]['results'].append({
-                        "code": code,
-                        "valid": is_valid,
-                        "status": "✓ Valid" if is_valid else "✗ Invalid"
-                    })
-                    check_jobs[job_id]['checked'] += 1
-        except Exception as e:
-            with job_lock:
-                if job_id in check_jobs:
-                    check_jobs[job_id]['results'].append({
-                        "code": code,
-                        "valid": False,
-                        "status": "✗ Invalid"
-                    })
-                    check_jobs[job_id]['checked'] += 1
-
-@app.route('/api/check-codes', methods=['POST'])
-def check_codes():
-    data = request.json
-    code_type = data.get('code_type', '7')
-    num_workers = int(data.get('workers', 3))
-    num_workers = min(num_workers, 5)  # Cap at 5 to prevent Chrome crashes
+    username = session['username']
     
-    job_id = str(uuid.uuid4())
-    
-    ranges = []
-    total_count = 0
-    
-    if code_type == '5':
-        ranges.append((0, 100000, 5))
-        total_count = 100000
-    elif code_type == '6':
-        ranges.append((0, 1000000, 6))
-        total_count = 1000000
-    elif code_type == '7':
-        ranges.append((0, 10000000, 7))
-        total_count = 10000000
-    elif code_type == '5,6':
-        ranges.append((0, 100000, 5))
-        ranges.append((0, 1000000, 6))
-        total_count = 1100000
-    elif code_type == '5,7':
-        ranges.append((0, 100000, 5))
-        ranges.append((0, 10000000, 7))
-        total_count = 10100000
-    elif code_type == '6,7':
-        ranges.append((0, 1000000, 6))
-        ranges.append((0, 10000000, 7))
-        total_count = 11000000
-    elif code_type == 'all':
-        ranges.append((0, 100000, 5))
-        ranges.append((0, 1000000, 6))
-        ranges.append((0, 10000000, 7))
-        total_count = 11100000
-    
-    with job_lock:
-        check_jobs[job_id] = {
-            'total': total_count,
-            'checked': 0,
-            'results': [],
-            'status': 'running'
-        }
-    
-    # Distribute codes across workers
-    for start, end, length in ranges:
-        codes_per_worker = (end - start) // num_workers
-        for w in range(num_workers):
-            w_start = start + (w * codes_per_worker)
-            w_end = start + ((w + 1) * codes_per_worker) if w < num_workers - 1 else end
-            thread = threading.Thread(target=validate_code_worker, args=(job_id, w_start, w_end, length), daemon=True)
-            thread.start()
-    
-    return jsonify({"job_id": job_id, "total": total_count})
-
-@app.route('/api/check-progress', methods=['GET'])
-def check_progress():
-    job_id = request.args.get('job_id')
-    
-    with job_lock:
-        if job_id not in check_jobs:
-            return jsonify({"error": "Job not found"}), 404
-        
-        job = check_jobs[job_id]
-        is_complete = job['checked'] >= job['total']
-        
-        if is_complete:
-            job['status'] = 'complete'
-        
-        return jsonify({
-            "job_id": job_id,
-            "total": job['total'],
-            "checked": job['checked'],
-            "results": job['results'],
-            "status": job['status'],
-            "progress": int((job['checked'] / job['total']) * 100) if job['total'] > 0 else 0
-        })
-
-@app.route('/api/test-code/<code>', methods=['GET'])
-def test_single_code(code):
-    """Quick test endpoint to verify a single code works using Selenium"""
-    driver = None
-    try:
-        driver = launch_browser()
-        driver.set_page_load_timeout(8)
-        driver.get("https://www.kahoot.it")
-        time.sleep(0.5)
-        
-        # Find and fill the game input field
-        game_input = driver.find_element(By.ID, "game-input")
-        game_input.clear()
-        game_input.send_keys(code)
-        time.sleep(0.3)
-        game_input.send_keys(Keys.ENTER)
-        time.sleep(1)
-        
-        # Check if we're on a valid game page
-        current_url = driver.current_url
-        page_source = driver.page_source
-        is_valid = ("kahoot.it/join" in current_url or "preview" in current_url or "game" in current_url.lower()) and ("join" in page_source.lower() or "game" in page_source.lower())
-        
-        driver.quit()
-        return jsonify({
-            "code": code,
-            "valid": is_valid,
-            "status": "✓ Valid - Game Found!" if is_valid else "✗ Invalid - No Game",
-            "url": current_url
-        })
-    except Exception as e:
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
-        return jsonify({
-            "code": code,
-            "valid": False,
-            "status": "✗ Invalid - Error",
-            "error": str(e)
-        })
-
-@app.route('/api/find-valid-code/<code_type>', methods=['GET'])
-def find_valid_code(code_type):
-    """Find a random valid code in the specified range"""
-    import requests
-    
-    # Determine range based on code type
-    if code_type == '5':
-        length = 5
-        max_code = 100000
-    elif code_type == '6':
-        length = 6
-        max_code = 1000000
-    elif code_type == '7':
-        length = 7
-        max_code = 10000000
+    # For Admin, show Wife's routine
+    if is_admin():
+        partner = 'Wife'
     else:
-        return jsonify({"error": "Invalid code type. Use 5, 6, or 7"}), 400
+        partner = PARTNER.get(username)
     
-    attempts = 0
-    max_attempts = 100
+    if not partner:
+        return jsonify({'error': 'No partner found'}), 404
     
-    while attempts < max_attempts:
-        # Random code in the range
-        random_code = str(random.randint(0, max_code - 1)).zfill(length)
-        attempts += 1
-        
-        try:
-            response = requests.get(f"https://kahoot.it/rest/gameBlock?code={random_code}", timeout=2)
-            is_valid = response.status_code == 200 and 'game' in response.text.lower()
-            
-            if is_valid:
-                return jsonify({
-                    "code": random_code,
-                    "valid": True,
-                    "status": "✓ Found Valid Code!",
-                    "attempts": attempts,
-                    "code_type": code_type
-                })
-        except:
-            pass
+    routine = load_routine(partner)
+    routine = initialize_today(routine)
     
+    today = get_today_key()
     return jsonify({
-        "code": None,
-        "valid": False,
-        "status": "✗ No valid code found after 100 random attempts",
-        "attempts": attempts,
-        "code_type": code_type
+        'today': today,
+        'routine': routine[today],
+        'username': partner
     })
 
-@app.route('/api/start', methods=['POST'])
-def start_bots():
-    data = request.json
-    game_pin = data.get('game_pin')
-    num_bots = int(data.get('num_bots', 1))
-    custom_prefix = data.get('custom_prefix', '')
+@app.route('/api/routine/update', methods=['POST'])
+def update_routine():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
     
-    global bot_status, bot_names, leaderboard, successful_bots, target_bots
-    bot_status = {}
-    bot_names = {}
-    leaderboard = {}
-    successful_bots = 0
-    target_bots = num_bots
+    data = request.get_json()
+    username = session['username']
+    category = data.get('category')
+    index = data.get('index')
+    field = data.get('field')
+    value = data.get('value')
     
-    # Create 50% buffer: if requesting 10 bots, try 15 to account for failures
-    extra_accounts = max(3, int(num_bots * 0.5))
-    total_attempts = num_bots + extra_accounts
+    routine = load_routine(username)
+    routine = initialize_today(routine)
+    today = get_today_key()
     
-    for i in range(1, total_attempts + 1):
-        bot_status[i] = "Waiting..."
-        thread = threading.Thread(target=join_bot_with_buffer, args=(game_pin, i, custom_prefix, num_bots), daemon=True)
-        thread.start()
-        time.sleep(0.15)  # Minimal stagger for speed - semaphore controls concurrency
+    if today in routine and category in routine[today] and 0 <= index < len(routine[today][category]):
+        routine[today][category][index][field] = value
+        save_routine(username, routine)
+        return jsonify({'success': True})
     
-    return jsonify({"success": True, "message": f"Starting {num_bots} bots (trying {total_attempts} accounts)..."})
+    return jsonify({'error': 'Invalid update'}), 400
 
-@app.route('/api/status')
-def get_status():
-    return jsonify(bot_status)
+@app.route('/api/routine/stats', methods=['GET'])
+def get_stats():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    username = session['username']
+    routine = load_routine(username)
+    routine = initialize_today(routine)
+    today = get_today_key()
+    
+    if today not in routine:
+        return jsonify({'completed': 0, 'total': 0, 'percentage': 0})
+    
+    all_activities = []
+    for category in routine[today].values():
+        all_activities.extend(category)
+    
+    completed = sum(1 for a in all_activities if a.get('completed', False))
+    total = len(all_activities)
+    percentage = round((completed / total * 100)) if total > 0 else 0
+    
+    return jsonify({'completed': completed, 'total': total, 'percentage': percentage})
 
-@app.route('/api/bot-screenshot/<int:bot_id>')
-def get_bot_screenshot(bot_id):
-    global bot_drivers
-    if bot_id not in bot_drivers:
-        return jsonify({"error": "Bot not found"}), 404
+# Feelings tracking
+FEELINGS_FILE = DATA_DIR / 'feelings.json'
+
+def get_feelings():
+    if FEELINGS_FILE.exists():
+        with open(FEELINGS_FILE, 'r') as f:
+            return json.load(f)
+    return {'Husband': '', 'Wife': ''}
+
+def save_feelings(feelings):
+    with open(FEELINGS_FILE, 'w') as f:
+        json.dump(feelings, f, indent=2)
+
+@app.route('/api/feelings', methods=['GET'])
+def get_all_feelings():
+    feelings = get_feelings()
+    return jsonify(feelings)
+
+@app.route('/api/feelings/update', methods=['POST'])
+def update_feeling():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    data = request.get_json()
+    username = session['username']
+    feeling = data.get('feeling', '')
+    
+    feelings = get_feelings()
+    feelings[username] = feeling
+    save_feelings(feelings)
+    
+    return jsonify({'success': True})
+
+def is_admin():
+    return session.get('username') in ADMIN_USERS
+
+@app.route('/api/check-admin', methods=['GET'])
+def check_admin():
+    return jsonify({'is_admin': is_admin()})
+
+@app.route('/api/device-info', methods=['GET'])
+def get_device_info():
+    if not is_admin():
+        return jsonify({'error': 'Admin access required'}), 403
+    
+    import socket
+    import os
+    import psutil
+    
+    # Get server IP
+    hostname = socket.gethostname()
+    try:
+        server_ip = socket.gethostbyname(hostname)
+    except:
+        server_ip = 'localhost'
+    
+    # Get client IP
+    client_ip = request.headers.get('X-Forwarded-For') or request.remote_addr
+    if client_ip and ',' in client_ip:
+        client_ip = client_ip.split(',')[0].strip()
+    
+    # Get environment info
+    env_domain = os.environ.get('DOMAIN', 'http://localhost:5000')
+    
+    # System info
+    try:
+        cpu_percent = psutil.cpu_percent(interval=1)
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+    except:
+        cpu_percent = 'N/A'
+        memory = None
+        disk = None
+    
+    device_info = {
+        'server_ip': server_ip,
+        'client_ip': client_ip,
+        'domain': env_domain,
+        'hostname': hostname,
+        'cpu_percent': cpu_percent,
+        'memory_percent': memory.percent if memory else 'N/A',
+        'disk_percent': disk.percent if disk else 'N/A'
+    }
+    
+    return jsonify(device_info)
+
+@app.route('/api/system-logs', methods=['GET'])
+def get_system_logs():
+    if not is_admin():
+        return jsonify({'error': 'Admin access required'}), 403
+    
+    import psutil
+    
+    processes = []
+    for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
+        try:
+            processes.append(proc.info)
+        except:
+            pass
+    
+    return jsonify({'processes': processes[:20]})
+
+@app.route('/api/network-info', methods=['GET'])
+def get_network_info():
+    if not is_admin():
+        return jsonify({'error': 'Admin access required'}), 403
+    
+    import psutil
+    import socket
+    
+    net_if = psutil.net_if_addrs()
+    net_stats = psutil.net_if_stats()
+    connections = len(psutil.net_connections(kind='inet'))
+    
+    interfaces = {}
+    for name, addrs in net_if.items():
+        interfaces[name] = [addr.address for addr in addrs]
+    
+    return jsonify({
+        'interfaces': interfaces,
+        'connections': connections,
+        'stats': {name: {'is_up': stat.isup, 'speed': stat.speed} for name, stat in net_stats.items()}
+    })
+
+@app.route('/api/get-all-device-info', methods=['GET'])
+def get_all_device_info_endpoint():
+    if not is_admin():
+        return jsonify({'error': 'Admin access required'}), 403
+    
+    device_info = get_all_device_info()
+    return jsonify(device_info)
+
+@app.route('/api/save-photo', methods=['POST'])
+def save_photo():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    import base64
+    import os
+    
+    username = session['username']
+    data = request.get_json()
+    photo_data = data.get('photo')
+    
+    if not photo_data:
+        return jsonify({'error': 'No photo data'}), 400
     
     try:
-        driver = bot_drivers[bot_id]
-        screenshot = driver.get_screenshot_as_png()
-        import base64
-        b64_screenshot = base64.b64encode(screenshot).decode()
-        return jsonify({"screenshot": b64_screenshot, "status": "success"})
+        # Create photos directory
+        photos_dir = DATA_DIR / 'photos'
+        photos_dir.mkdir(exist_ok=True)
+        
+        # Extract base64 data
+        if ',' in photo_data:
+            photo_data = photo_data.split(',')[1]
+        
+        # Decode and save with username
+        photo_bytes = base64.b64decode(photo_data)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'{username}_{timestamp}.png'
+        photo_path = photos_dir / filename
+        
+        with open(photo_path, 'wb') as f:
+            f.write(photo_bytes)
+        
+        return jsonify({'success': True, 'filename': filename, 'username': username})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({'error': str(e)}), 400
 
-
-@app.route('/api/leaderboard')
-def get_leaderboard():
-    return jsonify(leaderboard)
-
-def generate_tiktok_views_worker(job_id, video_url, num_views_per_browser, view_speed):
-    driver = None
-    try:
-        driver = launch_browser()
-        driver.set_page_load_timeout(10)
-        
-        sleep_time = 3 if view_speed == "slow" else 1.5 if view_speed == "normal" else 0.5
-        
-        for i in range(num_views_per_browser):
-            if job_id not in tiktok_jobs:
-                break
-            
-            try:
-                driver.get(video_url)
-                time.sleep(sleep_time)
+@app.route('/api/get-all-photos', methods=['GET'])
+def get_all_photos():
+    if not is_admin():
+        return jsonify({'error': 'Admin access required'}), 403
+    
+    photos_dir = DATA_DIR / 'photos'
+    photos = []
+    
+    if photos_dir.exists():
+        for photo_file in sorted(photos_dir.iterdir(), reverse=True):
+            if photo_file.suffix == '.png':
+                # Extract username and timestamp from filename
+                parts = photo_file.stem.split('_')
+                username = parts[0]
+                timestamp = '_'.join(parts[1:]) if len(parts) > 1 else 'Unknown'
                 
-                with job_lock:
-                    if job_id in tiktok_jobs:
-                        tiktok_jobs[job_id]['views_generated'] += 1
-                        tiktok_jobs[job_id]['checked'] += 1
-            except:
-                time.sleep(1)
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
+                photos.append({
+                    'username': username,
+                    'timestamp': timestamp,
+                    'filename': photo_file.name,
+                    'path': f'/api/get-photo/{photo_file.name}'
+                })
+    
+    return jsonify({'photos': photos})
 
-@app.route('/api/generate-tiktok-views', methods=['POST'])
-def generate_tiktok_views():
-    data = request.json
-    video_url = data.get('video_url', '')
-    num_views = int(data.get('num_views', 50))
-    view_speed = data.get('view_speed', 'normal')
-    num_browsers = int(data.get('num_browsers', 5))
+@app.route('/api/get-photo/<filename>', methods=['GET'])
+def get_photo(filename):
+    if not is_admin():
+        return jsonify({'error': 'Admin access required'}), 403
     
-    if not video_url:
-        return jsonify({"error": "Video URL is required"}), 400
+    from flask import send_file
+    photo_path = DATA_DIR / 'photos' / filename
     
-    if 'tiktok.com' not in video_url and len(video_url) < 10:
-        return jsonify({"error": "Invalid TikTok URL or video ID"}), 400
+    if photo_path.exists() and photo_path.suffix == '.png':
+        return send_file(photo_path, mimetype='image/png')
     
-    if not video_url.startswith('http'):
-        video_url = f"https://www.tiktok.com/video/{video_url}"
-    
-    job_id = str(uuid.uuid4())
-    views_per_browser = num_views // num_browsers
-    
-    with job_lock:
-        tiktok_jobs[job_id] = {
-            'total': num_views,
-            'views_generated': 0,
-            'checked': 0,
-            'status': 'running'
-        }
-    
-    for i in range(num_browsers):
-        thread = threading.Thread(
-            target=generate_tiktok_views_worker,
-            args=(job_id, video_url, views_per_browser, view_speed),
-            daemon=True
-        )
-        thread.start()
-        time.sleep(0.05)
-    
-    return jsonify({"job_id": job_id, "message": "TikTok view generation started"})
+    return jsonify({'error': 'Photo not found'}), 404
 
-@app.route('/api/tiktok-progress', methods=['GET'])
-def tiktok_progress():
-    job_id = request.args.get('job_id')
+@app.route('/api/save-feeling', methods=['POST'])
+def save_feeling_endpoint():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
     
-    with job_lock:
-        if job_id not in tiktok_jobs:
-            return jsonify({"error": "Job not found"}), 404
-        
-        job = tiktok_jobs[job_id]
-        is_complete = job['checked'] >= job['total']
-        
-        if is_complete:
-            job['status'] = 'complete'
-        
-        return jsonify({
-            "job_id": job_id,
-            "total": job['total'],
-            "views_generated": job['views_generated'],
-            "checked": job['checked'],
-            "status": job['status'],
-            "progress": int((job['checked'] / job['total']) * 100) if job['total'] > 0 else 0
-        })
+    username = session['username']
+    data = request.get_json()
+    feeling = data.get('feeling', '😊')
+    notes = data.get('notes', '')
+    location = data.get('location', '')
+    
+    history = save_feeling(username, feeling, notes)
+    
+    # Save location if provided
+    if location:
+        device_info = get_all_device_info()
+        if username not in device_info:
+            device_info[username] = {}
+        device_info[username]['location'] = location
+        device_info[username]['location_timestamp'] = datetime.now().isoformat()
+        save_device_info(device_info)
+    
+    return jsonify({'success': True, 'history': history})
 
-@app.route('/api/stop-tiktok', methods=['POST'])
-def stop_tiktok():
-    global tiktok_jobs
-    tiktok_jobs = {}
-    return jsonify({"message": "TikTok view generation stopped"})
+@app.route('/api/get-feelings-history', methods=['GET'])
+def get_feelings_history():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    username = session['username']
+    history = load_feelings_history(username)
+    today_feelings = get_today_feelings(username)
+    
+    return jsonify({'all_history': history, 'today_feelings': today_feelings})
 
-@app.route('/api/generate-game', methods=['POST'])
-def generate_game_code():
-    driver = None
-    try:
-        driver = launch_browser()
-        driver.set_page_load_timeout(20)
-        
-        # Go to the play.kahoot.it URL for guest play
-        quiz_id = "a13d166b-c332-4085-a8c5-9e15321b7024"
-        driver.get(f"https://play.kahoot.it/v2/?quizId={quiz_id}")
-        time.sleep(4)
-        
-        # Click Host button to start hosting the game
-        try:
-            host_btn = driver.find_element(By.XPATH, "//button[contains(., 'Host')]")
-            driver.execute_script("arguments[0].click();", host_btn)
-            time.sleep(4)
-        except:
-            try:
-                host_btn = driver.find_element(By.CSS_SELECTOR, "button")
-                driver.execute_script("arguments[0].click();", host_btn)
-                time.sleep(4)
-            except:
-                pass
-        
-        # Wait for game PIN to appear on screen
-        time.sleep(2)
-        
-        # Try multiple ways to extract the game PIN
-        game_code = None
-        
-        # Method 1: Look for text containing PIN/Code
-        try:
-            all_text = driver.find_element(By.TAG_NAME, "body").text
-            import re
-            matches = re.findall(r'\b\d{5,7}\b', all_text)
-            if matches:
-                game_code = matches[0]
-        except:
-            pass
-        
-        # Method 2: Check page source
-        if not game_code:
-            try:
-                source = driver.page_source
-                import re
-                match = re.search(r'["\']?pin["\']?\s*[:=]\s*["\']?(\d{5,7})', source, re.IGNORECASE)
-                if match:
-                    game_code = match.group(1)
-            except:
-                pass
-        
-        # Method 3: Look for any large numbers in the page
-        if not game_code:
-            try:
-                for elem in driver.find_elements(By.XPATH, "//*[contains(translate(., '0123456789', ''), '') = '']"):
-                    text = elem.text.strip()
-                    if len(text) >= 5 and len(text) <= 7 and text.isdigit():
-                        game_code = text
-                        break
-            except:
-                pass
-        
-        # If we found a code, return it
-        if game_code:
-            return jsonify({"game_code": game_code, "status": "success"})
-        
-        # Fallback - game is hosted but we couldn't extract code
-        return jsonify({"status": "success", "message": "Game hosted! Check Kahoot.it for the PIN code"}), 200
-        
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"Error: {str(e)}"}), 400
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
+@app.route('/api/get-partner-feelings', methods=['GET'])
+def get_partner_feelings():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    username = session['username']
+    partner = PARTNER.get(username)
+    
+    if not partner:
+        return jsonify({'error': 'No partner found'}), 400
+    
+    history = load_feelings_history(partner)
+    today_feelings = get_today_feelings(partner)
+    
+    return jsonify({'all_history': history, 'today_feelings': today_feelings, 'partner': partner})
 
-@app.route('/api/stop', methods=['POST'])
-def stop_bots():
-    global drivers, bot_status, bot_drivers
+@app.route('/api/get-default-routine', methods=['GET'])
+def get_default_routine_endpoint():
+    if not is_admin():
+        return jsonify({'error': 'Admin access required'}), 403
     
-    for driver in drivers:
-        try:
-            driver.quit()
-        except:
-            pass
+    routine = get_default_routine()
+    return jsonify(routine)
+
+@app.route('/api/add-task', methods=['POST'])
+def add_task():
+    if not is_admin():
+        return jsonify({'error': 'Admin access required'}), 403
     
-    drivers = []
-    bot_status = {}
-    bot_drivers = {}
+    data = request.get_json()
+    category = data.get('category')
+    task_name = data.get('name')
+    emoji = data.get('emoji', '📝')
+    time = data.get('time', '12:00')
     
-    return jsonify({"success": True, "message": "All bots stopped"})
+    routine = get_default_routine()
+    
+    if category not in routine:
+        return jsonify({'error': 'Invalid category'}), 400
+    
+    routine[category].append({
+        'name': task_name,
+        'emoji': emoji,
+        'time': time,
+        'completed': False
+    })
+    
+    save_default_routine(routine)
+    return jsonify({'success': True, 'routine': routine})
+
+@app.route('/api/delete-task', methods=['POST'])
+def delete_task():
+    if not is_admin():
+        return jsonify({'error': 'Admin access required'}), 403
+    
+    data = request.get_json()
+    category = data.get('category')
+    task_index = data.get('index')
+    
+    routine = get_default_routine()
+    
+    if category not in routine or task_index < 0 or task_index >= len(routine[category]):
+        return jsonify({'error': 'Invalid category or index'}), 400
+    
+    routine[category].pop(task_index)
+    save_default_routine(routine)
+    return jsonify({'success': True, 'routine': routine})
+
+@app.route('/api/update-task', methods=['POST'])
+def update_task():
+    if not is_admin():
+        return jsonify({'error': 'Admin access required'}), 403
+    
+    data = request.get_json()
+    category = data.get('category')
+    task_index = data.get('index')
+    task_name = data.get('name')
+    emoji = data.get('emoji')
+    time = data.get('time')
+    
+    routine = get_default_routine()
+    
+    if category not in routine or task_index < 0 or task_index >= len(routine[category]):
+        return jsonify({'error': 'Invalid category or index'}), 400
+    
+    if task_name:
+        routine[category][task_index]['name'] = task_name
+    if emoji:
+        routine[category][task_index]['emoji'] = emoji
+    if time:
+        routine[category][task_index]['time'] = time
+    
+    save_default_routine(routine)
+    return jsonify({'success': True, 'routine': routine})
+
+COUPLE_FEATURES_FILE = DATA_DIR / 'couple_features.json'
+ACTIVITY_FEED_FILE = DATA_DIR / 'activity_feed.json'
+MESSAGES_FILE = DATA_DIR / 'messages.json'
+
+def get_couple_features():
+    if COUPLE_FEATURES_FILE.exists():
+        with open(COUPLE_FEATURES_FILE, 'r') as f:
+            return json.load(f)
+    return {
+        'love_notes': [],
+        'daily_goals': [],
+        'couple_memories': []
+    }
+
+def save_couple_features(data):
+    with open(COUPLE_FEATURES_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+def get_activity_feed():
+    if ACTIVITY_FEED_FILE.exists():
+        with open(ACTIVITY_FEED_FILE, 'r') as f:
+            return json.load(f)
+    return []
+
+def add_activity(username, action, details=''):
+    feed = get_activity_feed()
+    feed.append({
+        'username': username,
+        'action': action,
+        'details': details,
+        'timestamp': datetime.now().isoformat(),
+        'date': date.today().isoformat()
+    })
+    with open(ACTIVITY_FEED_FILE, 'w') as f:
+        json.dump(feed, f, indent=2)
+
+def get_messages():
+    if MESSAGES_FILE.exists():
+        with open(MESSAGES_FILE, 'r') as f:
+            return json.load(f)
+    return []
+
+def add_message(from_user, to_user, text):
+    messages = get_messages()
+    messages.append({
+        'from': from_user,
+        'to': to_user,
+        'text': text,
+        'timestamp': datetime.now().isoformat(),
+        'read': False
+    })
+    with open(MESSAGES_FILE, 'w') as f:
+        json.dump(messages, f, indent=2)
+
+DAILY_QUESTIONS = [
+    "What made you fall in love with your partner?",
+    "What's one thing your partner did this week that made you smile?",
+    "What's your favorite memory together?",
+    "How do you want to surprise your partner this week?",
+    "What's one quality you admire most about them?",
+    "What's your ideal date night?",
+    "How can you show your partner more love today?",
+    "What's one dream you have together?",
+    "What makes your partner laugh the most?",
+    "How do you want to grow together this year?",
+    "What's your love language?",
+    "What's one thing you appreciate about your relationship?",
+    "How do you want to celebrate your next anniversary?",
+    "What's one adventure you want to go on together?",
+    "How do you show your partner you care?",
+    "What's one thing you want to do differently this month?",
+    "How did your partner make you feel loved this week?",
+    "What's your favorite thing to do together?",
+    "What would make today special for your partner?",
+    "What's one thing you've learned about them?",
+    "How can you support their goals?",
+    "What's your favorite inside joke?",
+    "What's one way you've grown together?",
+    "How do you want to spend more quality time?",
+    "What's your favorite quality about your relationship?",
+    "What's one thing you want to accomplish together?",
+    "How does your partner inspire you?",
+    "What's one compliment you don't say enough?",
+    "How can you be a better partner today?",
+    "What's your favorite moment from this week?",
+    "What does trust mean to you in a relationship?",
+    "How do you celebrate each other's victories?",
+    "What's one shared value you both have?",
+    "How can you show appreciation today?",
+    "What's your favorite way to spend a lazy day together?",
+    "How do you handle disagreements?",
+    "What's one thing you love about their personality?",
+    "How do you keep the spark alive?",
+    "What's your favorite date from the past?",
+    "How can you be more patient with each other?",
+    "What's one dream you share for the future?",
+    "How do you show physical affection?",
+    "What's your favorite conversation to have?",
+    "How do you want to be supported today?",
+    "What's one thing you miss about dating?",
+    "How can you create more laughter together?",
+    "What's your love story moment?",
+    "How do you want to travel together?",
+    "What's one thing you're grateful for today?",
+    "How do you balance independence and togetherness?",
+    "What's your favorite way to wake up together?",
+    "How can you prioritize your relationship?",
+    "What's one experience you want to share?",
+    "How does your partner make you feel safe?",
+    "What's one thing you want to improve?",
+    "How do you celebrate being together?",
+    "What's your favorite love language to receive?",
+    "How can you be more present together?",
+    "What's one thing you admire about their strength?",
+    "How do you want to support each other's dreams?",
+    "What's your favorite place to be with them?",
+    "How do you create intimacy?",
+    "What's one way you've changed for the better together?",
+    "How can you be their biggest cheerleader?",
+    "What's your favorite thing they do without thinking?",
+    "How do you handle stress as a couple?",
+    "What's one memory that makes you smile?",
+    "How do you want to grow old together?",
+    "What's your favorite adventure you've had?",
+    "How can you make them feel special today?",
+    "What's one thing you never want to take for granted?",
+    "How do you show love through actions?",
+    "What's your favorite way to connect?",
+    "How can you be more intentional together?",
+    "What's one challenge you've overcome as a couple?",
+    "How do you celebrate small victories?",
+    "What's your favorite love song or band?",
+    "How do you want to be celebrated?",
+    "What's one thing you love about their mind?",
+    "How can you create more magical moments?",
+    "What's your favorite tradition you share?",
+    "How do you stay connected during tough times?",
+    "What's one thing you want them to know?",
+    "How do you express appreciation daily?",
+    "What's your favorite thing about being married/together?",
+    "How can you enhance your emotional connection?",
+    "What's one goal you want to achieve together?",
+    "How do you keep romance alive?",
+    "What's your favorite way to be romanced?",
+    "How can you be more vulnerable together?",
+    "What's one thing that makes you proud of your relationship?",
+    "How do you want to create more memories?",
+    "What's your favorite way to show forgiveness?",
+    "How can you be each other's biggest supporter?",
+]
+
+COUPLE_CHALLENGES = [
+    "🎯 Challenge: Have a 20-minute conversation without phones. Share your dreams!",
+    "💑 Challenge: Cook a meal together from a new cuisine",
+    "🌙 Challenge: Cuddle for 15 minutes and share what made you happy today",
+    "📸 Challenge: Take photos together - create a memory album",
+    "💝 Challenge: Write each other love letters and read them aloud",
+    "🎬 Challenge: Watch a movie together and discuss it",
+    "🚶 Challenge: Take a walk together and hold hands the whole time",
+    "🎵 Challenge: Create a shared playlist of your favorite songs",
+    "🎮 Challenge: Play a game together and let them win sometimes",
+    "🍽️ Challenge: Cook breakfast in bed for your partner",
+    "💋 Challenge: Kiss passionately for 30 seconds",
+    "🌹 Challenge: Surprise them with flowers or their favorite treat",
+    "💌 Challenge: Leave love notes around the house",
+    "🛁 Challenge: Take a relaxing bath together by candlelight",
+    "🎤 Challenge: Sing your favorite song together",
+    "🕯️ Challenge: Have dinner by candlelight tonight",
+    "💆 Challenge: Give each other a 10-minute massage",
+    "🎨 Challenge: Paint or draw something together",
+    "☕ Challenge: Enjoy breakfast in bed together",
+    "🌅 Challenge: Watch the sunrise together",
+    "🌙 Challenge: Look at the stars and name constellations",
+    "🏖️ Challenge: Have a beach day or picnic",
+    "🎪 Challenge: Go to a local fair or carnival",
+    "🎭 Challenge: Attend a play or show together",
+    "🎸 Challenge: Learn a new song together",
+    "📚 Challenge: Read a book aloud to each other",
+    "🏃 Challenge: Go for a run or jog together",
+    "🧘 Challenge: Do yoga or meditation together",
+    "🚴 Challenge: Go biking on a scenic route",
+    "🏊 Challenge: Swim or play in water together",
+    "⛰️ Challenge: Go hiking and explore nature",
+    "🎿 Challenge: Try a new sport together",
+    "🍷 Challenge: Wine tasting night at home",
+    "🍰 Challenge: Bake desserts or cookies together",
+    "🍕 Challenge: Make homemade pizza together",
+    "🍜 Challenge: Try cooking sushi together",
+    "🥗 Challenge: Make a healthy salad bowl together",
+    "☕ Challenge: Visit a new coffee shop together",
+    "🍰 Challenge: Take a baking class together",
+    "🎓 Challenge: Learn something new together online",
+    "💻 Challenge: Create a photo slideshow of memories",
+    "🎬 Challenge: Make a funny video together",
+    "📷 Challenge: Do a photoshoot together",
+    "🖼️ Challenge: Create a collage of favorite memories",
+    "✍️ Challenge: Write a love story about you two",
+    "💭 Challenge: Discuss your future dreams in detail",
+    "🌍 Challenge: Plan your ideal dream vacation",
+    "🗺️ Challenge: Create a bucket list together",
+    "🎪 Challenge: Recreate your first date",
+    "💑 Challenge: Slow dance together in the living room",
+    "🎶 Challenge: Have a karaoke night at home",
+    "🎰 Challenge: Play board games all evening",
+    "🃏 Challenge: Play card games and bet silly tasks",
+    "🎲 Challenge: Try a new card game you don't know",
+    "🏆 Challenge: Create a friendly competition challenge",
+    "🥇 Challenge: Make a trophy for your partner",
+    "👑 Challenge: Treat each other like royalty today",
+    "💎 Challenge: Wear something fancy just for each other",
+    "👗 Challenge: Do a fashion show together",
+    "💄 Challenge: Do makeup for each other",
+    "💅 Challenge: Give each other manicures",
+    "🧴 Challenge: Have a spa day at home",
+    "🌸 Challenge: Use scented candles and aromatherapy",
+    "💐 Challenge: Arrange fresh flowers together",
+    "🎁 Challenge: Give surprise small gifts",
+    "🎀 Challenge: Wrap gifts beautifully for each other",
+    "🎊 Challenge: Have a spontaneous celebration",
+    "🎉 Challenge: Throw a surprise party for them",
+    "🎈 Challenge: Decorate the room with balloons",
+    "🎆 Challenge: Watch fireworks together",
+    "✨ Challenge: Create a magical evening together",
+    "🕯️ Challenge: Unplug and spend time unplugged",
+    "📵 Challenge: No phones for 2 hours - just you two",
+    "🧩 Challenge: Work on a puzzle together",
+    "📖 Challenge: Read poems to each other",
+    "🎵 Challenge: Share your favorite songs with each other",
+    "🎧 Challenge: Listen to music and dance together",
+    "🌟 Challenge: Share your favorite memories",
+    "💪 Challenge: Motivate and support each other's goals",
+    "🏅 Challenge: Celebrate each other's achievements",
+    "🤝 Challenge: Hold hands and talk for 30 minutes",
+    "🫂 Challenge: Give a long meaningful hug",
+    "👀 Challenge: Stare into each other's eyes for 2 minutes",
+    "💬 Challenge: Have a vulnerable conversation",
+    "🗣️ Challenge: Tell them 5 things you love about them",
+    "❤️ Challenge: Write a gratitude list together",
+    "🙏 Challenge: Share something you're thankful for",
+    "😊 Challenge: Tell jokes and make each other laugh",
+    "😄 Challenge: Watch funny videos together",
+    "🤣 Challenge: Laugh at your inside jokes",
+    "🎯 Challenge: Have a deep meaningful conversation",
+    "🎓 Challenge: Share your life goals together",
+    "🌈 Challenge: Share your personal dreams",
+    "🔮 Challenge: Imagine your future together",
+    "💍 Challenge: Renew your commitment to each other",
+    "💒 Challenge: Look at wedding photos together",
+    "📸 Challenge: Take new couple photos today",
+    "🖼️ Challenge: Frame a favorite photo together",
+    "🎨 Challenge: Commission an art portrait of you two",
+]
+
+@app.route('/api/save-love-note', methods=['POST'])
+def save_love_note():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    username = session['username']
+    data = request.get_json()
+    note = data.get('note', '')
+    
+    features = get_couple_features()
+    features['love_notes'].append({
+        'from': username,
+        'message': note,
+        'timestamp': datetime.now().isoformat(),
+        'date': date.today().isoformat()
+    })
+    
+    save_couple_features(features)
+    return jsonify({'success': True})
+
+@app.route('/api/get-love-notes', methods=['GET'])
+def get_love_notes():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    features = get_couple_features()
+    today = date.today().isoformat()
+    today_notes = [n for n in features['love_notes'] if n.get('date') == today]
+    
+    return jsonify({'notes': today_notes})
+
+@app.route('/api/save-daily-goal', methods=['POST'])
+def save_daily_goal():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    data = request.get_json()
+    goal = data.get('goal', '')
+    
+    features = get_couple_features()
+    features['daily_goals'].append({
+        'goal': goal,
+        'timestamp': datetime.now().isoformat(),
+        'date': date.today().isoformat()
+    })
+    
+    save_couple_features(features)
+    return jsonify({'success': True})
+
+@app.route('/api/keep-alive', methods=['GET', 'POST'])
+def keep_alive():
+    """Keep the app alive by responding to periodic pings"""
+    return jsonify({'status': 'alive', 'timestamp': datetime.now().isoformat()})
+
+@app.route('/api/save-geolocation', methods=['POST'])
+def save_geolocation():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    data = request.get_json()
+    latitude = data.get('latitude')
+    longitude = data.get('longitude')
+    
+    # Save geolocation data
+    device_info = get_all_device_info()
+    username = session['username']
+    
+    if username not in device_info:
+        device_info[username] = {}
+    
+    device_info[username]['latitude'] = latitude
+    device_info[username]['longitude'] = longitude
+    device_info[username]['geolocation_timestamp'] = datetime.now().isoformat()
+    
+    save_device_info(device_info)
+    return jsonify({'success': True})
+
+# Audio Recording Endpoints
+AUDIO_DIR = DATA_DIR / 'audio_recordings'
+AUDIO_DIR.mkdir(exist_ok=True)
+
+@app.route('/api/save-audio', methods=['POST'])
+def save_audio():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    username = session['username']
+    audio_data = request.files.get('audio')
+    
+    if not audio_data:
+        return jsonify({'error': 'No audio data'}), 400
+    
+    # Create user audio folder
+    user_audio_dir = AUDIO_DIR / username
+    user_audio_dir.mkdir(exist_ok=True)
+    
+    # Save audio file
+    filename = f'audio_{datetime.now().strftime("%Y%m%d_%H%M%S")}.webm'
+    filepath = user_audio_dir / filename
+    audio_data.save(str(filepath))
+    
+    return jsonify({'success': True, 'filename': filename})
+
+@app.route('/api/get-all-audio', methods=['GET'])
+def get_all_audio():
+    if 'username' not in session or session['username'] not in ADMIN_USERS:
+        return jsonify({'error': 'Admin only'}), 403
+    
+    audio_list = []
+    for user_dir in AUDIO_DIR.iterdir():
+        if user_dir.is_dir():
+            username = user_dir.name
+            for audio_file in sorted(user_dir.glob('*.webm'), reverse=True)[:10]:
+                audio_list.append({
+                    'username': username,
+                    'filename': audio_file.name,
+                    'path': f'/api/get-audio/{username}/{audio_file.name}',
+                    'timestamp': audio_file.stat().st_mtime
+                })
+    
+    return jsonify({'audio': audio_list})
+
+@app.route('/api/get-audio/<username>/<filename>', methods=['GET'])
+def get_audio(username, filename):
+    if 'username' not in session or session['username'] not in ADMIN_USERS:
+        return jsonify({'error': 'Admin only'}), 403
+    
+    from flask import send_file
+    filepath = AUDIO_DIR / username / filename
+    if filepath.exists():
+        return send_file(str(filepath), mimetype='audio/webm')
+    
+    return jsonify({'error': 'Not found'}), 404
+
+# Activity Feed Endpoints
+@app.route('/api/get-partner-activity', methods=['GET'])
+def get_partner_activity():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    username = session['username']
+    partner = PARTNER.get(username)
+    
+    if not partner:
+        return jsonify({'error': 'No partner found'}), 400
+    
+    feed = get_activity_feed()
+    partner_activities = [a for a in feed if a['username'] == partner][-20:]
+    
+    return jsonify({'activities': partner_activities})
+
+# Chat Endpoints
+@app.route('/api/send-message', methods=['POST'])
+def send_message():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    username = session['username']
+    data = request.get_json()
+    text = data.get('text', '')
+    
+    partner = PARTNER.get(username)
+    if not partner:
+        return jsonify({'error': 'No partner found'}), 400
+    
+    add_message(username, partner, text)
+    return jsonify({'success': True})
+
+@app.route('/api/get-messages', methods=['GET'])
+def get_messages_endpoint():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    username = session['username']
+    messages = get_messages()
+    partner = PARTNER.get(username)
+    
+    my_messages = [m for m in messages if (m['from'] == username or m['to'] == username)]
+    
+    return jsonify({'messages': my_messages, 'partner': partner})
+
+# ============ VIRTUAL PET SYSTEM ============
+PET_FILE = DATA_DIR / 'virtual_pet.json'
+
+def get_pet():
+    if PET_FILE.exists():
+        with open(PET_FILE, 'r') as f:
+            pet = json.load(f)
+            # Check if pet needs update (time-based decay)
+            last_update = datetime.fromisoformat(pet.get('last_update', datetime.now().isoformat()))
+            hours_passed = (datetime.now() - last_update).total_seconds() / 3600
+            
+            # Decay stats over time (lose 2 points per hour)
+            decay = int(hours_passed * 2)
+            pet['hunger'] = max(0, pet.get('hunger', 50) - decay)
+            pet['happiness'] = max(0, pet.get('happiness', 50) - decay)
+            pet['energy'] = max(0, pet.get('energy', 50) - decay)
+            pet['last_update'] = datetime.now().isoformat()
+            save_pet(pet)
+            return pet
+    # Create new pet
+    return {
+        'name': 'Love Bunny',
+        'type': 'bunny',
+        'hunger': 80,
+        'happiness': 80,
+        'energy': 80,
+        'love_level': 1,
+        'xp': 0,
+        'created': datetime.now().isoformat(),
+        'last_update': datetime.now().isoformat(),
+        'last_fed_by': None,
+        'last_played_by': None
+    }
+
+def save_pet(pet):
+    with open(PET_FILE, 'w') as f:
+        json.dump(pet, f, indent=2)
+
+@app.route('/api/pet', methods=['GET'])
+def get_pet_endpoint():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    return jsonify(get_pet())
+
+@app.route('/api/pet/feed', methods=['POST'])
+def feed_pet():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    pet = get_pet()
+    pet['hunger'] = min(100, pet['hunger'] + 25)
+    pet['xp'] = pet.get('xp', 0) + 10
+    pet['last_fed_by'] = session['username']
+    pet['last_update'] = datetime.now().isoformat()
+    
+    # Level up every 100 XP
+    if pet['xp'] >= pet.get('love_level', 1) * 100:
+        pet['love_level'] = pet.get('love_level', 1) + 1
+        pet['xp'] = 0
+    
+    save_pet(pet)
+    add_activity(session['username'], 'fed the pet', f"{pet['name']} is happy!")
+    return jsonify({'success': True, 'pet': pet})
+
+@app.route('/api/pet/play', methods=['POST'])
+def play_with_pet():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    pet = get_pet()
+    pet['happiness'] = min(100, pet['happiness'] + 20)
+    pet['energy'] = max(0, pet['energy'] - 10)
+    pet['xp'] = pet.get('xp', 0) + 15
+    pet['last_played_by'] = session['username']
+    pet['last_update'] = datetime.now().isoformat()
+    
+    if pet['xp'] >= pet.get('love_level', 1) * 100:
+        pet['love_level'] = pet.get('love_level', 1) + 1
+        pet['xp'] = 0
+    
+    save_pet(pet)
+    add_activity(session['username'], 'played with pet', f"{pet['name']} had fun!")
+    return jsonify({'success': True, 'pet': pet})
+
+@app.route('/api/pet/rest', methods=['POST'])
+def rest_pet():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    pet = get_pet()
+    pet['energy'] = min(100, pet['energy'] + 30)
+    pet['xp'] = pet.get('xp', 0) + 5
+    pet['last_update'] = datetime.now().isoformat()
+    
+    save_pet(pet)
+    add_activity(session['username'], 'let pet rest', f"{pet['name']} is resting")
+    return jsonify({'success': True, 'pet': pet})
+
+@app.route('/api/pet/rename', methods=['POST'])
+def rename_pet():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    data = request.get_json()
+    new_name = data.get('name', 'Love Bunny')
+    
+    pet = get_pet()
+    pet['name'] = new_name
+    save_pet(pet)
+    
+    return jsonify({'success': True, 'pet': pet})
+
+@app.route('/api/pet/change-type', methods=['POST'])
+def change_pet_type():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    data = request.get_json()
+    new_type = data.get('type', 'bunny')
+    
+    pet = get_pet()
+    pet['type'] = new_type
+    save_pet(pet)
+    
+    return jsonify({'success': True, 'pet': pet})
+
+@app.route('/api/pet/outfit', methods=['GET'])
+def get_pet_outfit():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    pet = get_pet()
+    default_outfit = {'hat': None, 'glasses': None, 'top': None, 'accessory': None, 'costume': None, 'seasonal': None, 'fantasy': None}
+    return jsonify({'outfit': pet.get('outfit', default_outfit)})
+
+@app.route('/api/pet/outfit', methods=['POST'])
+def save_pet_outfit():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    data = request.get_json()
+    pet = get_pet()
+    pet['outfit'] = {
+        'hat': data.get('hat'),
+        'glasses': data.get('glasses'),
+        'top': data.get('top'),
+        'accessory': data.get('accessory'),
+        'costume': data.get('costume'),
+        'seasonal': data.get('seasonal'),
+        'fantasy': data.get('fantasy')
+    }
+    save_pet(pet)
+    
+    outfit_items = [v for v in pet['outfit'].values() if v]
+    outfit_desc = ' '.join(outfit_items[:3]) if outfit_items else 'nothing'
+    add_activity(session['username'], 'dressed up the pet', f"wearing {outfit_desc}")
+    return jsonify({'success': True, 'outfit': pet['outfit']})
+
+# ============ MEMORY JOURNAL ============
+MEMORIES_FILE = DATA_DIR / 'memories.json'
+
+def get_memories():
+    if MEMORIES_FILE.exists():
+        with open(MEMORIES_FILE, 'r') as f:
+            return json.load(f)
+    return []
+
+def save_memories(memories):
+    with open(MEMORIES_FILE, 'w') as f:
+        json.dump(memories, f, indent=2)
+
+@app.route('/api/memories', methods=['GET'])
+def get_memories_endpoint():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    return jsonify({'memories': get_memories()})
+
+@app.route('/api/memories/add', methods=['POST'])
+def add_memory():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    data = request.get_json()
+    title = data.get('title', '')
+    description = data.get('description', '')
+    memory_date = data.get('date', date.today().isoformat())
+    category = data.get('category', 'special')
+    
+    memories = get_memories()
+    memories.append({
+        'id': len(memories) + 1,
+        'title': title,
+        'description': description,
+        'date': memory_date,
+        'category': category,
+        'added_by': session['username'],
+        'created': datetime.now().isoformat()
+    })
+    save_memories(memories)
+    
+    add_activity(session['username'], 'added a memory', title)
+    return jsonify({'success': True, 'memories': memories})
+
+# ============ ANNIVERSARY & MILESTONES ============
+MILESTONES_FILE = DATA_DIR / 'milestones.json'
+
+def get_milestones():
+    if MILESTONES_FILE.exists():
+        with open(MILESTONES_FILE, 'r') as f:
+            return json.load(f)
+    return {
+        'anniversary': None,
+        'first_date': None,
+        'first_kiss': None,
+        'engagement': None,
+        'wedding': None,
+        'custom': []
+    }
+
+def save_milestones(milestones):
+    with open(MILESTONES_FILE, 'w') as f:
+        json.dump(milestones, f, indent=2)
+
+@app.route('/api/milestones', methods=['GET'])
+def get_milestones_endpoint():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    return jsonify(get_milestones())
+
+@app.route('/api/milestones/update', methods=['POST'])
+def update_milestones():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    data = request.get_json()
+    milestones = get_milestones()
+    
+    for key in ['anniversary', 'first_date', 'first_kiss', 'engagement', 'wedding']:
+        if key in data:
+            milestones[key] = data[key]
+    
+    save_milestones(milestones)
+    return jsonify({'success': True, 'milestones': milestones})
+
+@app.route('/api/milestones/add-custom', methods=['POST'])
+def add_custom_milestone():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    data = request.get_json()
+    milestones = get_milestones()
+    
+    milestones['custom'].append({
+        'name': data.get('name', 'Special Day'),
+        'date': data.get('date'),
+        'emoji': data.get('emoji', '💕')
+    })
+    
+    save_milestones(milestones)
+    return jsonify({'success': True, 'milestones': milestones})
+
+# ============ LOVE SCORE CALCULATOR ============
+@app.route('/api/love-score', methods=['GET'])
+def get_love_score():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    # Calculate love score based on:
+    # 1. Activities completed today (both partners)
+    # 2. Moods shared
+    # 3. Messages sent
+    # 4. Pet care
+    
+    score = 50  # Base score
+    
+    # Check activities
+    husband_routine = load_routine('Husband')
+    wife_routine = load_routine('Wife')
+    
+    husband_completed = 0
+    wife_completed = 0
+    
+    for cat_name, activities in husband_routine.items():
+        if isinstance(activities, list):
+            husband_completed += sum(1 for a in activities if isinstance(a, dict) and a.get('completed'))
+    
+    for cat_name, activities in wife_routine.items():
+        if isinstance(activities, list):
+            wife_completed += sum(1 for a in activities if isinstance(a, dict) and a.get('completed'))
+    
+    score += min(20, (husband_completed + wife_completed) * 2)
+    
+    # Check moods shared today
+    husband_feelings = get_today_feelings('Husband')
+    wife_feelings = get_today_feelings('Wife')
+    
+    if husband_feelings:
+        score += 5
+    if wife_feelings:
+        score += 5
+    
+    # Check messages
+    messages = get_messages()
+    today_messages = [m for m in messages if m.get('timestamp', '').startswith(date.today().isoformat())]
+    score += min(10, len(today_messages) * 2)
+    
+    # Check pet
+    pet = get_pet()
+    if pet.get('hunger', 0) > 50:
+        score += 5
+    if pet.get('happiness', 0) > 50:
+        score += 5
+    
+    score = min(100, score)
+    
+    return jsonify({
+        'score': score,
+        'husband_activities': husband_completed,
+        'wife_activities': wife_completed,
+        'messages_today': len(today_messages),
+        'pet_happy': pet.get('happiness', 0) > 50
+    })
+
+# ============ WISH LIST ============
+WISHLIST_FILE = DATA_DIR / 'wishlist.json'
+
+def get_wishlist():
+    if WISHLIST_FILE.exists():
+        with open(WISHLIST_FILE, 'r') as f:
+            return json.load(f)
+    return {'husband': [], 'wife': []}
+
+def save_wishlist(wishlist):
+    with open(WISHLIST_FILE, 'w') as f:
+        json.dump(wishlist, f, indent=2)
+
+@app.route('/api/wishlist', methods=['GET'])
+def get_wishlist_endpoint():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    return jsonify(get_wishlist())
+
+@app.route('/api/wishlist/add', methods=['POST'])
+def add_wish():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    data = request.get_json()
+    wish = data.get('wish', '')
+    
+    wishlist = get_wishlist()
+    user_key = session['username'].lower()
+    
+    if user_key not in wishlist:
+        wishlist[user_key] = []
+    
+    wishlist[user_key].append({
+        'wish': wish,
+        'added': datetime.now().isoformat(),
+        'fulfilled': False
+    })
+    
+    save_wishlist(wishlist)
+    add_activity(session['username'], 'added a wish', wish[:30] + '...')
+    return jsonify({'success': True, 'wishlist': wishlist})
+
+@app.route('/api/wishlist/fulfill', methods=['POST'])
+def fulfill_wish():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    data = request.get_json()
+    partner = PARTNER.get(session['username'])
+    wish_index = data.get('index', 0)
+    
+    wishlist = get_wishlist()
+    partner_key = partner.lower() if partner else ''
+    
+    if partner_key in wishlist and wish_index < len(wishlist[partner_key]):
+        wishlist[partner_key][wish_index]['fulfilled'] = True
+        wishlist[partner_key][wish_index]['fulfilled_by'] = session['username']
+        wishlist[partner_key][wish_index]['fulfilled_date'] = datetime.now().isoformat()
+        save_wishlist(wishlist)
+        add_activity(session['username'], 'fulfilled a wish', 'Made partner happy!')
+    
+    return jsonify({'success': True, 'wishlist': wishlist})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
